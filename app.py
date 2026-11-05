@@ -140,8 +140,12 @@ with st.form("astro_form"):
     submitted = st.form_submit_button(T["submit_btn"])
 
 def calculate_chart(dob, tob, place_name):
-    geolocator = Nominatim(user_agent="astro_trilingual_engine")
-    loc = geolocator.geocode(place_name)
+    geolocator = Nominatim(user_agent="astro_vedik_shil_app", timeout=15)
+    try:
+        loc = geolocator.geocode(place_name)
+    except Exception:
+        loc = None
+
     if not loc:
         return None, T["err_place"]
     lat, lon = loc.latitude, loc.longitude
