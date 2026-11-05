@@ -120,7 +120,14 @@ with st.form("astro_form"):
     st.subheader(T["form_header"])
     name = st.text_input(T["name"])
     gender = st.selectbox(T["gender"], T["gender_opts"])
-    dob = st.date_input(T["dob"])
+    dob = st.date_input(
+    T["dob"],
+    value=datetime.date(1990, 1, 1),
+    min_value=datetime.date(1900, 1, 1),
+    max_value=datetime.date.today()
+)
+
+
     tob = st.time_input(T["tob"])
     place = st.text_input(T["place"])
 
