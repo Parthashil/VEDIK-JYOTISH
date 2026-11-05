@@ -1,6 +1,7 @@
 import streamlit as st
 import swisseph as swe
-from datetime import datetime
+from datetime import datetime, date
+
 import pytz
 import urllib.parse
 from geopy.geocoders import Nominatim
@@ -122,10 +123,9 @@ with st.form("astro_form"):
     gender = st.selectbox(T["gender"], T["gender_opts"])
     dob = st.date_input(
     T["dob"],
-    value=datetime.date(1990, 1, 1),
-    min_value=datetime.date(1900, 1, 1),
-    max_value=datetime.date.today()
+    min_value=date(1900, 1, 1)
 )
+
 
 
     tob = st.time_input(T["tob"])
