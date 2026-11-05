@@ -1,7 +1,7 @@
-streamlit
+
 pyswisseph
 geopy
 timezonefinder
 pytz
 reportlab
-shil.partha123@axl
+
