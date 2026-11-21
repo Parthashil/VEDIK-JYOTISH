@@ -8,9 +8,11 @@ from geopy.geocoders import Nominatim
 from timezonefinder import TimezoneFinder
 
 # --- আপনার নিজস্ব সেটিংস ---
-MY_UPI_ID = "shil.partha123@axl"  # আপনার সুরক্ষিত UPI ID
-MASTER_PIN = "7890"  # এই ৪ সংখ্যার পিনটি আপনি জানবেন, যা টাকা পাওয়ার পর ক্লায়েন্টকে দেবেন
-REPORT_PRICE = "199.00"
+MY_UPI_ID = "shil.partha123@axl"
+PIN_21 = "2121"      # ২১ টাকার প্যাকের পিন
+PIN_51 = "5151"      # ৫১ টাকার পূর্ণাঙ্গ রিপোর্টের পিন
+PRICE_BASIC = "21.00"
+PRICE_PRO = "51.00"
 
 st.set_page_config(page_title="Astrology & Health Engine", layout="centered")
 
@@ -171,176 +173,310 @@ def calculate_chart(dob, tob, place_name):
         'Saturn': swe.SATURN, 'Rahu': swe.MEAN_NODE
     }
 
-    positions = {'Ascendant': {'deg': asc_deg, 'sign': asc_sign}}
+    positions = {'Ascendant': {'deg': asc_deg, 'sign': asc_sign, 'retro': False}}
     for p_name, p_id in planets_map.items():
         res, _ = swe.calc_ut(jd, p_id, swe.FLG_SIDEREAL)
         deg = res[0]
-        positions[p_name] = {'deg': deg, 'sign': int(deg // 30) + 1}
+        speed = res[3]
+        positions[p_name] = {
+            'deg': deg,
+            'sign': int(deg // 30) + 1,
+            'retro': True if speed < 0 and p_name not in ['Rahu'] else False
+        }
 
     ketu_deg = (positions['Rahu']['deg'] + 180) % 360
-    positions['Ketu'] = {'deg': ketu_deg, 'sign': int(ketu_deg // 30) + 1}
+    positions['Ketu'] = {'deg': ketu_deg, 'sign': int(ketu_deg // 30) + 1, 'retro': True}
 
     gulika_deg = (asc_deg + 135) % 360
-    positions['Gulika'] = {'deg': gulika_deg, 'sign': int(gulika_deg // 30) + 1}
+    positions['Gulika'] = {'deg': gulika_deg, 'sign': int(gulika_deg // 30) + 1, 'retro': False}
 
-    return positions, None
+    # আজকের গোচর (Daily Transit) গণনা
+    now_utc = datetime.now(pytz.utc)
+    jd_now = swe.julday(now_utc.year, now_utc.month, now_utc.day, now_utc.hour + now_utc.minute / 60.0)
+    moon_now_res, _ = swe.calc_ut(jd_now, swe.MOON, swe.FLG_SIDEREAL)
+    transit_moon_deg = moon_now_res[0]
 
-def analyze_chart(pos, gender, lang, queries):
+    return {'planets': positions, 'cusps': cusps, 'jd': jd, 'transit_moon': transit_moon_deg}, None
+
+
+# --- সহায়ক ফাংশন: ডিগ্রি, নক্ষত্র, কেপি সাব-লর্ড ও দশা ---
+NAK_NAMES = [
+    "অশ্বিনী", "ভরণী", "কৃত্তিকা", "রোহিণী", "মৃগশিরা", "আর্দ্রা", "পুনর্বসু", "পুষ্যা", "অশ্লেষা",
+    "মঘা", "পূর্বফল্গুনী", "উত্তরফল্গুনী", "হস্তা", "চিত্রা", "স্বাতী", "বিশাখা", "অনুরাধা", "জ্যেষ্ঠা",
+    "মূলা", "পূর্বাষাঢ়া", "উত্তরাষাঢ়া", "শ্রবণা", "ধনিষ্ঠা", "শতভিষা", "পূর্বভাদ্রপদ", "উত্তরভাদ্রপদ", "রেবতী"
+]
+VIM_LORDS = ["কেতু", "শুক্র", "রবি", "চন্দ্র", "মঙ্গল", "রাহু", "বৃহস্পতি", "শনি", "বুধ"]
+VIM_YEARS = [7, 20, 6, 10, 7, 18, 16, 19, 17]
+
+def get_kp_details(deg):
+    deg = deg % 360
+    nak_span = 360.0 / 27.0  # 13°20'
+    nak_idx = int(deg // nak_span)
+    nak_name = NAK_NAMES[nak_idx]
+    star_lord_idx = nak_idx % 9
+    star_lord = VIM_LORDS[star_lord_idx]
+
+    # KP Sub-lord হিসাব
+    rem_in_nak = deg - (nak_idx * nak_span)
+    curr = 0.0
+    sub_lord = star_lord
+    for i in range(9):
+        idx = (star_lord_idx + i) % 9
+        span = (VIM_YEARS[idx] / 120.0) * nak_span
+        if curr <= rem_in_nak < curr + span:
+            sub_lord = VIM_LORDS[idx]
+            break
+        curr += span
+
+    deg_in_sign = deg % 30
+    d = int(deg_in_sign)
+    m = int((deg_in_sign - d) * 60)
+    s = int(((deg_in_sign - d) * 60 - m) * 60)
+    dms = f"{d:02d}° {m:02d}' {s:02d}\""
+    return dms, nak_name, star_lord, sub_lord, nak_idx
+
+def get_vimshottari_current(moon_deg, dob):
+    nak_span = 360.0 / 27.0
+    nak_idx = int(moon_deg // nak_span)
+    start_idx = nak_idx % 9
+    rem_frac = 1.0 - ((moon_deg % nak_span) / nak_span)
+    
+    age_years = (date.today() - dob).days / 365.25
+    elapsed = 0.0
+    first_bal = VIM_YEARS[start_idx] * rem_frac
+    
+    if age_years < first_bal:
+        maha_idx = start_idx
+        rem_maha = first_bal - age_years
+    else:
+        elapsed = first_bal
+        maha_idx = start_idx
+        for i in range(1, 18):
+            idx = (start_idx + i) % 9
+            if elapsed + VIM_YEARS[idx] > age_years:
+                maha_idx = idx
+                rem_maha = (elapsed + VIM_YEARS[idx]) - age_years
+                break
+            elapsed += VIM_YEARS[idx]
+    return VIM_LORDS[start_idx], VIM_LORDS[maha_idx], round(rem_maha, 1)
+
+
+def analyze_chart(chart_data, dob, gender, lang, queries):
+    pos = chart_data['planets']
+    cusps = chart_data['cusps']
+    t_moon = chart_data['transit_moon']
+
     signs = {
         "বাংলা": ["মেষ", "বৃষ", "মিথুন", "কর্কট", "সিংহ", "কন্যা", "তুলা", "বৃশ্চিক", "ধনু", "মকর", "কুম্ভ", "মীন"],
         "English": ["Aries", "Taurus", "Gemini", "Cancer", "Leo", "Virgo", "Libra", "Scorpio", "Sagittarius", "Capricorn", "Aquarius", "Pisces"],
         "हिन्दी": ["मेष", "वृषभ", "मिथुन", "कर्क", "सिंह", "कन्या", "तुला", "वृश्चिक", "धनु", "मकर", "कुंभ", "मीन"]
     }
-    r_list = signs[lang]
+    p_bn = {
+        'Ascendant': 'লগ্ন', 'Sun': 'রবি', 'Moon': 'চন্দ্র', 'Mars': 'মঙ্গল',
+        'Mercury': 'বুধ', 'Jupiter': 'বৃহস্পতি', 'Venus': 'শুক্র',
+        'Saturn': 'শনি', 'Rahu': 'রাহু', 'Ketu': 'কেতু', 'Gulika': 'গুলিক'
+    }
+    r_list = signs.get(lang, signs["বাংলা"])
     asc = pos['Ascendant']['sign']
     moon = pos['Moon']['sign']
     rep = {}
 
+    _, moon_nak, _, _, birth_nak_idx = get_kp_details(pos['Moon']['deg'])
     rep['asc'] = r_list[asc - 1]
     rep['moon'] = r_list[moon - 1]
+    rep['moon_nak'] = moon_nak
     rep['gulika'] = r_list[pos['Gulika']['sign'] - 1]
 
-    if lang == "বাংলা":
-        rep['grahan'] = "সূর্য/চন্দ্র রাহুর প্রভাবে গ্রহণ সংক্রান্ত সংবেদনশীলতা রয়েছে।" if abs(pos['Sun']['deg'] - pos['Rahu']['deg']) < 12 or abs(pos['Moon']['deg'] - pos['Rahu']['deg']) < 12 else "কুণ্ডলীতে কোনো প্রত্যক্ষ গ্রহণ দোষ নেই।"
-        rep['sadesati'] = "গোচরে শনির অবস্থান সাপেক্ষে সাড়েসাতির সতর্কতা বা প্রভাব বজায় রয়েছে।" if (11 - moon) % 12 in [11, 0, 1] else "বর্তমানে সাড়েসাতি চলছে না।"
-        rep['nerve'] = "স্নায়বিক সংবেদনশীলতা ও অনিদ্রা এড়াতে মানসিক বিশ্রাম প্রয়োজন।" if pos['Mercury']['sign'] in [6, 8, 12] else "স্নায়ুতন্ত্র স্থিতিশীল ও কর্মক্ষম।"
-        rep['bone'] = "মেরুদণ্ড, অস্থিসন্ধি ও ক্যালসিয়ামের ভারসাম্যে নজর দেওয়া উচিত।" if pos['Sun']['sign'] in [7, 8] or pos['Saturn']['sign'] in [1, 7] else "হাড় ও শারীরিক কাঠামো বলিষ্ঠ।"
-        rep['senses'] = "দৃষ্টিশক্তি ও শ্রবণের যত্ন নেওয়া বাঞ্ছনীয়।" if pos['Sun']['sign'] in [2, 12] else "পঞ্চেন্দ্রিয়ের সংবেদনশীলতা স্বাভাবিক।"
-        rep['female_health'] = "হরমোনাল ভারসাম্য ও তলপেটের রুটিন চেকআপ প্রয়োজন।" if pos['Mars']['sign'] == 8 or pos['Venus']['sign'] in [6, 8] else "প্রজনন স্বাস্থ্য স্থিতিশীল।"
-        rep['mother'] = "মায়ের মন সংবেদনশীল; বাতের ব্যথা ও অনিদ্রার প্রতি যত্ন নেওয়া প্রয়োজন।"
-        rep['father'] = "পিতা আত্মসম্মানবোধসম্পন্ন ও দৃঢ় চরিত্রের; অস্থি বা রক্তচাপে নজর দিন।"
-        rep['vastu'] = "বাড়ির উত্তর-পূর্ব (ঈশান) ও দক্ষিণ-পূর্ব কোণ পরিষ্কার রাখুন।"
-        rep['remedy'] = "প্রতিদিন প্রাতঃসূর্যের আলো নিন, পাখিদের জল দিন এবং ঘরে কর্পূর জ্বালান।"
-    elif lang == "English":
-        rep['grahan'] = "Eclipse influence detected via Rahu proximity." if abs(pos['Sun']['deg'] - pos['Rahu']['deg']) < 12 or abs(pos['Moon']['deg'] - pos['Rahu']['deg']) < 12 else "No direct eclipse (Grahan) blemish detected."
-        rep['sadesati'] = "Saturn's transit indicates ongoing Sade Sati phase." if (11 - moon) % 12 in [11, 0, 1] else "Currently free from Sade Sati phase."
-        rep['nerve'] = "Neurological sensitivity and high stress sensitivity detected." if pos['Mercury']['sign'] in [6, 8, 12] else "Nervous system and cognitive balance stable."
-        rep['bone'] = "Pay attention to spine, joints, and Vitamin D/Calcium levels." if pos['Sun']['sign'] in [7, 8] or pos['Saturn']['sign'] in [1, 7] else "Skeletal structure and bone density sound."
-        rep['senses'] = "Vision or sensory care advised." if pos['Sun']['sign'] in [2, 12] else "Sensory faculties balanced."
-        rep['female_health'] = "Hormonal and pelvic sensitivity indicated; routine checkup recommended." if pos['Mars']['sign'] == 8 or pos['Venus']['sign'] in [6, 8] else "Reproductive vitality stable."
-        rep['mother'] = "Mother is deeply emotional; joint/sleep issues require care."
-        rep['father'] = "Father is authoritative and disciplined; monitor cardiac/bone wellness."
-        rep['vastu'] = "Maintain cleanliness in North-East and South-East areas of the home."
-        rep['remedy'] = "Offer water to morning Sun, feed birds, and burn camphor in evenings."
-    else:
-        rep['grahan'] = "सूर्य/चंद्र पर राहु प्रभाव से ग्रहण दोष की संवेदनशीलता है।" if abs(pos['Sun']['deg'] - pos['Rahu']['deg']) < 12 or abs(pos['Moon']['deg'] - pos['Rahu']['deg']) < 12 else "कुंडली में कोई प्रत्यक्ष ग्रहण दोष नहीं है।"
-        rep['sadesati'] = "शनि के गोचर अनुसार साढ़ेसाती का प्रभाव वर्तमान में चल रहा है।" if (11 - moon) % 12 in [11, 0, 1] else "वर्तमान समय में साढ़ेसाती का प्रभाव नहीं है।"
-        rep['nerve'] = "स्नायु दुर्बलता एवं अत्यधिक तनाव से बचाव आवश्यक है।" if pos['Mercury']['sign'] in [6, 8, 12] else "तंत्रिका तंत्र संतुलित एवं सशक्त है।"
-        rep['bone'] = "रीढ़, जोड़ों एवं कैल्शियम की स्थिति पर ध्यान देना श्रेयस्कर है।" if pos['Sun']['sign'] in [7, 8] or pos['Saturn']['sign'] in [1, 7] else "अस्थि संरचना सशक्त है।"
-        rep['senses'] = "नेत्र अथवा कान की देखभाल पर ध्यान दें।" if pos['Sun']['sign'] in [2, 12] else "पंचेंद्रियां संतुलित स्थिति में हैं।"
-        rep['female_health'] = "हार्मोनल संतुलन एवं आंतरिक स्वास्थ्य की जांच आवश्यक है।" if pos['Mars']['sign'] == 8 or pos['Venus']['sign'] in [6, 8] else "आंतरिक स्वास्थ्य अनुकूल है।"
-        rep['mother'] = "माता का स्वभाव भावुक है; जोड़ों के दर्द व नींद पर ध्यान दें।"
-        rep['father'] = "पिता स्वाभिमानी एवं अनुशासित हैं; रक्तचाप व अस्थि स्वास्थ्य पर ध्यान दें।"
-        rep['vastu'] = "घर का ईशान एवं आग्नेय कोण स्वच्छ व खुला रखें।"
-        rep['remedy'] = "प्रातः सूर्य दर्शन करें, पक्षियों को जल दें तथा संध्या समय कपूर जलाएं।"
+    # গ্রহস্ফুট টেবিল তৈরি
+    planet_rows = []
+    for p_key in ['Ascendant', 'Sun', 'Moon', 'Mars', 'Mercury', 'Jupiter', 'Venus', 'Saturn', 'Rahu', 'Ketu']:
+        p_info = pos[p_key]
+        dms, nak, star_l, sub_l, _ = get_kp_details(p_info['deg'])
+        retro_tag = " (বক্রী)" if p_info['retro'] else ""
+        planet_rows.append({
+            "গ্রহ": p_bn[p_key] + retro_tag,
+            "রাশি": r_list[p_info['sign'] - 1],
+            "ডিগ্রি": dms,
+            "নক্ষত্র": nak,
+            "নক্ষত্রাধিপতি": star_l,
+            "সাব-লর্ড (KP)": sub_l
+        })
+    rep['planet_table'] = planet_rows
+
+    # ১২টি ভাবের KP Cuspal টেবিল
+    cusp_rows = []
+    for i in range(12):
+        c_deg = cusps[i]
+        c_sign = int(c_deg // 30) + 1
+        dms, nak, star_l, sub_l, _ = get_kp_details(c_deg)
+        cusp_rows.append({
+            "ভাব": f"{i+1}ম ভাব",
+            "রাশি": r_list[c_sign - 1],
+            "কাস্প ডিগ্রি": dms,
+            "নক্ষত্রাধিপতি": star_l,
+            "সাব-লর্ড (KP)": sub_l
+        })
+    rep['cusp_table'] = cusp_rows
+
+    # বিংশোত্তরী দশা
+    birth_dasha, curr_dasha, rem_yrs = get_vimshottari_current(pos['Moon']['deg'], dob)
+    rep['dasha_info'] = f"জন্মকালীন মহাদশা: **{birth_dasha}** | বর্তমান চলমান মহাদশা: **{curr_dasha}** (আরও প্রায় {rem_yrs} বছর অবশিষ্ট)"
+
+    # প্রতিদিনের গোচর ফলাফল (তারাশুদ্ধি ও চন্দ্র গোচর)
+    _, t_nak, _, _, t_nak_idx = get_kp_details(t_moon)
+    t_moon_sign = int(t_moon // 30) + 1
+    tara_num = ((t_nak_idx - birth_nak_idx) % 27) % 9 + 1
+    tara_map = {
+        1: ("জন্ম তারা", "মিশ্র ফল — শরীর ও মনের যত্ন নিন, তাড়াহুড়ো করবেন না।"),
+        2: ("সম্পদ তারা", "অত্যন্ত শুভ — অর্থলাভ, নতুন পরিকল্পনা ও কাজের সাফল্যের দিন।"),
+        3: ("বিপদ তারা", "সতর্কতা প্রয়োজন — বিতর্ক, ঝুঁকিপূর্ণ বিনিয়োগ ও ভ্রমণে সাবধান থাকুন।"),
+        4: ("ক্ষেম তারা", "শুভ দিন — মানসিক শান্তি, পারিবারিক সুখ ও আটকে থাকা কাজ সম্পন্ন হবে।"),
+        5: ("প্রত্যারি তারা", "বাধা-বিপত্তির যোগ — অকারণ দুশ্চিন্তা এড়িয়ে ধৈর্য ধরুন।"),
+        6: ("সাধক তারা", "কর্মসিদ্ধির দিন — প্রচেষ্টায় সাফল্য ও সম্মান বৃদ্ধি পাবে।"),
+        7: ("বধ তারা", "অশুভ/সতর্কতার দিন — বড় কোনো সিদ্ধান্ত বা নতুন চুক্তি আজ স্থগিত রাখুন।"),
+        8: ("মিত্র তারা", "অনুকূল দিন — বন্ধু, সহকর্মী ও শুভানুধ্যায়ীদের সহযোগিতা পাবেন।"),
+        9: ("পরম মিত্র তারা", "অত্যন্ত শুভ — ভাগ্য সহায় থাকবে, গুরুত্বপূর্ণ কাজের জন্য সেরা সময়।")
+    }
+    tara_name, tara_desc = tara_map[tara_num]
+    transit_house = ((t_moon_sign - moon) % 12) + 1
+    rep['daily_transit'] = {
+        't_sign': r_list[t_moon_sign - 1],
+        't_nak': t_nak,
+        'tara': f"{tara_name} ({tara_num}ম তারা)",
+        'tara_desc': tara_desc,
+        'house_msg': f"আজ চন্দ্র আপনার জন্মরাশি থেকে **{transit_house}ম ভাবে** ({r_list[t_moon_sign - 1]} রাশিতে, {t_nak} নক্ষত্রে) গোচর করছে।"
+    }
+
+    # বিস্তারিত ফলাফল ও প্রতিকার
+    rep['grahan'] = "সূর্য বা চন্দ্র রাহুর নিকটবর্তী হওয়ায় গ্রহণ সংক্রান্ত সংবেদনশীলতা রয়েছে; অমাবস্যা-পূর্ণিমায় মানসিক স্থিরতা বজায় রাখুন।" if abs(pos['Sun']['deg'] - pos['Rahu']['deg']) < 12 or abs(pos['Moon']['deg'] - pos['Rahu']['deg']) < 12 else "কুণ্ডলীতে কোনো প্রত্যক্ষ গ্রহণ দোষ নেই।"
+    rep['sadesati'] = "গোচরে শনির অবস্থান সাপেক্ষে সাড়েসাতির সতর্কতা বা কর্মভার বৃদ্ধি বজায় রয়েছে।" if (11 - moon) % 12 in [11, 0, 1] else "বর্তমানে জন্মরাশির ওপর শনির সাড়েসাতির প্রভাব নেই।"
+    rep['nerve'] = "বুধের অবস্থান অনুযায়ী স্নায়বিক সংবেদনশীলতা ও অনিদ্রা এড়াতে নিয়মিত প্রাণায়াম ও বিশ্রাম প্রয়োজন।" if pos['Mercury']['sign'] in [6, 8, 12] else "স্নায়ুতন্ত্র ও স্মৃতিশক্তি স্থিতিশীল ও কর্মক্ষম।"
+    rep['bone'] = "মেরুদণ্ড, অস্থিসন্ধি ও ভিটামিন-ডি/ক্যালসিয়ামের ভারসাম্যে নজর দেওয়া উচিত।" if pos['Sun']['sign'] in [7, 8] or pos['Saturn']['sign'] in [1, 7] else "হাড় ও শারীরিক কাঠামো বলিষ্ঠ।"
+    rep['senses'] = "দৃষ্টিশক্তি ও কানের যত্ন নেওয়া বাঞ্ছনীয়।" if pos['Sun']['sign'] in [2, 12] else "পঞ্চেন্দ্রিয়ের সংবেদনশীলতা স্বাভাবিক।"
+    rep['female_health'] = "হরমোনাল ভারসাম্য ও তলপেটের রুটিন চেকআপ প্রয়োজন।" if pos['Mars']['sign'] == 8 or pos['Venus']['sign'] in [6, 8] else "প্রজনন স্বাস্থ্য স্থিতিশীল।"
+    rep['mother'] = "মায়ের মন সংবেদনশীল; বাতের ব্যথা, রক্তচাপ ও অনিদ্রার প্রতি যত্ন নেওয়া প্রয়োজন।"
+    rep['father'] = "পিতা আত্মসম্মানবোধসম্পন্ন ও দৃঢ় চরিত্রের; অস্থি বা হৃদযন্ত্রের যত্নে নজর দিন।"
+    rep['vastu'] = "বাড়ির উত্তর-পূর্ব (ঈশান) কোণ পরিষ্কার ও আলোকিত রাখুন এবং দক্ষিণ-পূর্ব কোণে অগ্নি উপাদানের ভারসাম্য বজায় রাখুন।"
+    rep['remedy'] = "প্রতিদিন প্রাতঃসূর্যের আলো নিন, তামার পাত্রে জল পান করুন, পাখিদের জল দিন এবং সন্ধ্যায় ঘরে কর্পূর জ্বালান।"
 
     answers = {}
     seventh_sign = ((asc + 6) % 12) or 12
     if queries.get('partner'):
-        if lang == "বাংলা":
-            answers['partner'] = "জীবনসঙ্গী শান্ত, সংবেদনশীল ও পারিবারিক মূল্যবোধসম্পন্ন ব্যক্তিত্বের হবেন।" if seventh_sign in [2, 4, 9, 12] else "জীবনসঙ্গী বাস্তববাদী, আত্মমর্যাদাবান ও স্বাধীনচেতা স্বভাবের হবেন।"
-        elif lang == "English":
-            answers['partner'] = "Spouse will be gentle, emotionally supportive and family-oriented." if seventh_sign in [2, 4, 9, 12] else "Spouse will be pragmatic, self-directed, and strongly ambitious."
-        else:
-            answers['partner'] = "जीवनसाथी शांत, संवेदनशील और पारिवारिक मूल्यों का सम्मान करने वाले होंगे।" if seventh_sign in [2, 4, 9, 12] else "जीवनसाथी स्वाभिमानी, व्यावहारिक और स्वतंत्र विचारों वाले होंगे।"
-
+        answers['partner'] = "**দাম্পত্য ও জীবনসঙ্গী বিচার (৭ম ভাব):** জীবনসঙ্গী শান্ত, সংবেদনশীল ও পারিবারিক মূল্যবোধসম্পন্ন ব্যক্তিত্বের হবেন। পারস্পরিক বোঝাপড়া সুদৃঢ় থাকবে।" if seventh_sign in [2, 4, 9, 12] else "**দাম্পত্য ও জীবনসঙ্গী বিচার (৭ম ভাব):** জীবনসঙ্গী বাস্তববাদী, আত্মমর্যাদাবান ও স্বাধীনচেতা স্বভাবের হবেন। মতের অমিল এড়াতে নমনীয়তা বজায় রাখা শুভ।"
     if queries.get('career'):
-        if lang == "বাংলা":
-            answers['career'] = "স্বাধীন পেশা (Consultancy/Self-employment) বা ব্যবসার দিকে ভাগ্যোদয় প্রবল।" if pos['Mercury']['sign'] in [10, 7] or pos['Saturn']['sign'] in [10, 11] else "চাকরি বা কোনো স্থায়ী সাংগঠনিক পদে দায়িত্ব পালন অধিক লাভজনক।"
-        elif lang == "English":
-            answers['career'] = "High potential in independent practice, consultancy, or business." if pos['Mercury']['sign'] in [10, 7] or pos['Saturn']['sign'] in [10, 11] else "Service, organized corporate employment, or administrative roles yield higher stability."
-        else:
-            answers['career'] = "स्वतंत्र व्यवसाय, परामर्श कार्य अथवा स्वरोजगार में उन्नति के प्रबल योग हैं।" if pos['Mercury']['sign'] in [10, 7] or pos['Saturn']['sign'] in [10, 11] else "स्थिर नौकरी अथवा संगठनात्मक सेवा कार्य अधिक फलदायी रहेगा।"
-
+        answers['career'] = "**কর্ম ও পেশা বিচার (১০ম ও ৬ষ্ঠ ভাব):** স্বাধীন পেশা (Consultancy/Self-employment) বা নিজস্ব ব্যবসার দিকে ভাগ্যোদয় প্রবল।" if pos['Mercury']['sign'] in [10, 7] or pos['Saturn']['sign'] in [10, 11] else "**কর্ম ও পেশা বিচার (১০ম ও ৬ষ্ঠ ভাব):** স্থায়ী চাকরি বা কোনো প্রশাসনিক/সাংগঠনিক পদে দায়িত্ব পালন অধিক লাভজনক ও নিরাপদ।"
     if queries.get('secret'):
-        if lang == "বাংলা":
-            answers['secret'] = "ইউরিনারি বা তলপেটের সংবেদনশীলতায় সতর্কতা রাখুন; জল বেশি পান করুন।" if pos['Rahu']['sign'] == 8 or pos['Mars']['sign'] in [6, 8] else "গুপ্ত রোগ বা অভ্যন্তরীণ জটিলতার নেতিবাচক প্রভাব নেই।"
-        elif lang == "English":
-            answers['secret'] = "Pelvic or urinary tract vigilance recommended; maintain hydration." if pos['Rahu']['sign'] == 8 or pos['Mars']['sign'] in [6, 8] else "No prominent afflictions pointing to concealed chronic ailments."
-        else:
-            answers['secret'] = "मूत्र प्रणाली या आंतरिक अंगों के प्रति सावधानी रखें; भरपूर जल ग्रहण करें।" if pos['Rahu']['sign'] == 8 or pos['Mars']['sign'] in [6, 8] else "किसी गंभीर आंतरिक या गुप्त रोग के नकारात्मक योग नहीं हैं।"
-
+        answers['secret'] = "**সংবেদনশীল স্বাস্থ্য বিচার (৮ম ও ১২শ ভাব):** ইউরিনারি বা তলপেটের সংবেদনশীলতায় সতর্কতা রাখুন; পর্যাপ্ত জল পান ও নিয়মিত শারীরিক পরীক্ষা জরুরি।" if pos['Rahu']['sign'] == 8 or pos['Mars']['sign'] in [6, 8] else "**সংবেদনশীল স্বাস্থ্য বিচার (৮ম ও ১২শ ভাব):** গুপ্ত রোগ বা দীর্ঘমেয়াদী অভ্যন্তরীণ জটিলতার কোনো নেতিবাচক প্রভাব নেই।"
     if queries.get('orient'):
-        if lang == "বাংলা":
-            answers['orient'] = "প্রচলিত ধারণার বাইরে ভিন্নধর্মী রুচি ও গভীর আত্মিক মানসিক যোগাযোগের টান থাকবে।" if pos['Venus']['sign'] in [pos['Mercury']['sign'], pos['Saturn']['sign']] and pos['Rahu']['sign'] in [7, 8] else "সম্পর্কের ক্ষেত্রে ঐতিহ্যগত মূল্যবোধ ও স্বাভাবিক আকর্ষণ বজায় থাকবে।"
-        elif lang == "English":
-            answers['orient'] = "Inclination towards non-conventional dynamics and profound emotional depth." if pos['Venus']['sign'] in [pos['Mercury']['sign'], pos['Saturn']['sign']] and pos['Rahu']['sign'] in [7, 8] else "Conventional relationship dynamics and harmonious balance observed."
-        else:
-            answers['orient'] = "पारंपरिक मान्यताओं से हटकर प्रगाढ़ मानसिक जुड़ाव एवं स्वतंत्र सोच की ओर आकर्षण रहेगा।" if pos['Venus']['sign'] in [pos['Mercury']['sign'], pos['Saturn']['sign']] and pos['Rahu']['sign'] in [7, 8] else "संबंधों में परंपरागत संतुलन एवं सौहार्द बना रहेगा।"
+        answers['orient'] = "**মানসিক ও সম্পর্কের প্রবণতা (শুক্র-রাহু যোগ):** প্রচলিত ধারণার বাইরে ভিন্নধর্মী রুচি ও গভীর আত্মিক মানসিক যোগাযোগের টান থাকবে।" if pos['Venus']['sign'] in [pos['Mercury']['sign'], pos['Saturn']['sign']] and pos['Rahu']['sign'] in [7, 8] else "**মানসিক ও সম্পর্কের প্রবণতা (৫ম ও শুক্র বিচার):** সম্পর্কের ক্ষেত্রে ঐতিহ্যগত মূল্যবোধ, স্থিরতা ও স্বাভাবিক আকর্ষণ বজায় থাকবে।"
 
     rep['answers'] = answers
     return rep
 
+
 if submitted:
-    st.session_state['ready'] = True
-    st.session_state['user_data'] = {
-        'name': name, 'gender': gender, 'dob': dob, 'tob': tob, 'place': place,
-        'queries': {'partner': q_partner, 'career': q_career, 'secret': q_secret, 'orient': q_orient}
-    }
+    if not place.strip():
+        st.error("অনুগ্রহ করে জন্মস্থানের নাম লিখুন (যেমন: Kalyani, West Bengal)।")
+    else:
+        st.session_state['ready'] = True
+        st.session_state['user_data'] = {
+            'name': name, 'gender': gender, 'dob': dob, 'tob': tob, 'place': place,
+            'queries': {'partner': q_partner, 'career': q_career, 'secret': q_secret, 'orient': q_orient}
+        }
 
 if st.session_state.get('ready'):
     ud = st.session_state['user_data']
-    positions, err = calculate_chart(ud['dob'], ud['tob'], ud['place'])
+    chart_data, err = calculate_chart(ud['dob'], ud['tob'], ud['place'])
     if err:
         st.error(err)
     else:
-        rep = analyze_chart(positions, ud['gender'], selected_lang, ud['queries'])
+        rep = analyze_chart(chart_data, ud['dob'], ud['gender'], selected_lang, ud['queries'])
 
-        st.subheader(T["preview_header"])
-        c1, c2 = st.columns(2)
-        c1.info(f"**{T['asc']}:** {rep['asc']}")
-        c2.info(f"**{T['moon_sign']}:** {rep['moon']}")
-        st.warning(T["pay_warn"])
+        # --- বিনামূল্যে প্রাথমিক অংশ ---
+        st.subheader("🌟 প্রাথমিক জন্মপরিচয় (বিনামূল্যে)")
+        c1, c2, c3 = st.columns(3)
+        c1.info(f"**লগ্ন:** {rep['asc']}")
+        c2.info(f"**জন্মরাশি:** {rep['moon']}")
+        c3.info(f"**জন্ম নক্ষত্র:** {rep['moon_nak']}")
 
-        if not st.session_state.get('paid'):
+        tier = st.session_state.get('unlock_tier', 0)  # 0 = locked, 21 = basic, 51 = full
+
+        # --- পেমেন্ট সেকশন (যদি ৫১ প্যাক আনলক না হয়ে থাকে) ---
+        if tier < 51:
             st.markdown("---")
-            st.subheader(T["pay_header"])
-            
-            # আপনার কাস্টম UPI ID দিয়ে সরাসরি QR কোড
-            upi_url = f"upi://pay?pa={MY_UPI_ID}&pn=AstroConsultancy&am={REPORT_PRICE}&cu=INR&tn=Kundali_Report"
+            st.subheader("🔓 আপনার পছন্দের রিপোর্ট আনলক করুন")
+            pack_choice = st.radio(
+                "প্যাকেজ নির্বাচন করুন:",
+                [
+                    f"₹{PRICE_BASIC} — দৈনিক গোচর ফলাফল + ৯টি গ্রহের স্পষ্ট অবস্থান ও কেপি সাব-লর্ড টেবিল",
+                    f"₹{PRICE_PRO} — পূর্ণাঙ্গ প্রফেশনাল রিপোর্ট (গ্রহস্ফুট + ১২ ভাবের KP কাস্প টেবিল + বিংশোত্তরী দশা + প্রশ্নোত্তর ও প্রতিকার)"
+                ]
+            )
+            sel_amount = PRICE_BASIC if "21" in pack_choice else PRICE_PRO
+            upi_url = f"upi://pay?pa={MY_UPI_ID}&pn=AstroConsultancy&am={sel_amount}&cu=INR&tn=Astro_Report_{sel_amount}"
             qr_api = f"https://api.qrserver.com/v1/create-qr-code/?size=200x200&data={urllib.parse.quote(upi_url)}"
 
             col1, col2 = st.columns([1, 1])
             with col1:
-                st.image(qr_api, caption="GPay / PhonePe / Paytm")
+                st.image(qr_api, caption=f"স্ক্যান করে ₹{sel_amount} পেমেন্ট করুন")
             with col2:
-                st.write(f"**Fee:** ₹{REPORT_PRICE}")
-                st.write("১. QR কোড স্ক্যান করে পেমেন্ট করুন।")
-                st.write("২. টাকা পাঠানোর পর আমাদের কাছ থেকে প্রাপ্ত ৪ সংখ্যার পিনটি নিচে বসান।")
-                
-                input_pin = st.text_input(T["pin_lbl"], type="password")
-                if st.button(T["unlock_btn"]):
-                    if input_pin == MASTER_PIN:
-                        st.session_state['paid'] = True
-                        st.success(T["success_unlock"])
+                st.write(f"**নির্বাচিত মূল্য:** ₹{sel_amount}")
+                st.write("১. যেকোনো UPI অ্যাপ (GPay / PhonePe / Paytm) দিয়ে QR কোড স্ক্যান করে পেমেন্ট করুন।")
+                st.write("২. পেমেন্টের পর প্রাপ্ত ৪ সংখ্যার পিন দিয়ে আনলক করুন।")
+                input_pin = st.text_input("৪ সংখ্যার আনলক পিন দিন:", type="password")
+                if st.button("রিপোর্ট আনলক করুন"):
+                    if input_pin == PIN_51:
+                        st.session_state['unlock_tier'] = 51
+                        st.rerun()
+                    elif input_pin == PIN_21:
+                        st.session_state['unlock_tier'] = 21
                         st.rerun()
                     else:
-                        st.error("ভুল পিন! সঠিক পিন পেতে পেমেন্টের স্ক্রিনশট পাঠিয়ে যোগাযোগ করুন।")
+                        st.error("ভুল পিন! সঠিক পিন পেতে পেমেন্টের স্ক্রিনশট পাঠান।")
 
-        if st.session_state.get('paid'):
-            st.success(T["success_unlock"])
+        # --- আনলক হওয়া রিপোর্ট প্রদর্শন (₹২১ এবং ₹৫১ উভয়ের জন্য) ---
+        if tier >= 21:
+            st.markdown("---")
+            st.success("✅ রিপোর্ট আনলক হয়েছে!")
 
-            st.markdown(f"### {T['sec_astro']}")
-            st.write(f"• **Gulika:** {rep['gulika']}")
-            st.write(f"• **Sade Sati:** {rep['sadesati']}")
-            st.write(f"• **Eclipse (Grahan):** {rep['grahan']}")
+            st.markdown("### 📅 আজকের গোচর ও দৈনিক ফলাফল (Daily Transit)")
+            dt_info = rep['daily_transit']
+            st.info(f"{dt_info['house_msg']}\n\n**আজকের তারাশুদ্ধি:** {dt_info['tara']} — {dt_info['tara_desc']}")
 
-            st.markdown(f"### {T['sec_health']}")
-            st.write(f"• **Nerves:** {rep['nerve']}")
-            st.write(f"• **Bones:** {rep['bone']}")
-            st.write(f"• **Senses:** {rep['senses']}")
+            st.markdown("### 🪐 নবগ্রহের স্পষ্ট অবস্থান, নক্ষত্র ও কেপি সাব-লর্ড")
+            st.table(rep['planet_table'])
+
+        # --- শুধুমাত্র ₹৫১ পূর্ণাঙ্গ রিপোর্টের অংশ ---
+        if tier == 51:
+            st.markdown("### 🏛️ দ্বাদশ ভাবের কেপি কাস্পাল অবস্থান (KP Cuspal Table)")
+            st.table(rep['cusp_table'])
+
+            st.markdown("### ⏳ বিংশোত্তরী মহাদশা বিচার")
+            st.write(rep['dasha_info'])
+
+            st.markdown("### 📊 জ্যোতিষ ও গ্রহীয় যোগ বিচার")
+            st.write(f"• **গুলিক অবস্থান:** {rep['gulika']}")
+            st.write(f"• **শনির সাড়েসাতি:** {rep['sadesati']}")
+            st.write(f"• **গ্রহণ দোষ বিচার:** {rep['grahan']}")
+
+            st.markdown("### 🩺 স্বাস্থ্য, ইন্দ্রিয় ও শারীরিক গঠন")
+            st.write(f"• **স্নায়ুতন্ত্র:** {rep['nerve']}")
+            st.write(f"• **অস্থি ও কাঠামো:** {rep['bone']}")
+            st.write(f"• **পঞ্চেন্দ্রিয়:** {rep['senses']}")
             if ud['gender'] in ["মহিলা", "Female"]:
-                st.write(f"• **Internal/Pelvic Health:** {rep['female_health']}")
+                st.write(f"• **আভ্যন্তরীণ স্বাস্থ্য:** {rep['female_health']}")
 
-            st.markdown(f"### {T['sec_family']}")
-            st.write(f"• **Mother:** {rep['mother']}")
-            st.write(f"• **Father:** {rep['father']}")
+            st.markdown("### 👨‍👩‍👦 পিতা ও মাতা সংক্রান্ত বিচার")
+            st.write(f"• **মাতৃভাব:** {rep['mother']}")
+            st.write(f"• **পিতৃভাব:** {rep['father']}")
 
             if rep['answers']:
-                st.markdown(f"### {T['sec_queries']}")
+                st.markdown("### 🎯 আপনার নির্বাচিত প্রশ্নগুলোর গভীর বিশ্লেষণ")
                 for k, ans in rep['answers'].items():
                     st.write(f"• {ans}")
 
-            st.markdown(f"### {T['sec_vastu']}")
-            st.write(f"• **Vastu:** {rep['vastu']}")
-            st.write(f"• **Remedies:** {rep['remedy']}")
+            st.markdown("### 🏡 বাস্তু ও ব্যবহারিক প্রতিকার নির্দেশিকা")
+            st.write(f"• **বাস্তু পরামর্শ:** {rep['vastu']}")
+            st.write(f"• **প্রতিকার:** {rep['remedy']}")
+
+    
